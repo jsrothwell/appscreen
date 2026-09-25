@@ -589,14 +589,95 @@ function setCurrentScreenshotAsDefault() {
 }
 
 // Language flags mapping
+// Covers Apple App Store Connect's supported metadata locales plus a few
+// common regional variants. Users can add further custom locales at runtime
+// (see loadCustomLanguages / saveCustomLanguage) which are merged in here.
 const languageFlags = {
-    'en': '🇺🇸', 'en-gb': '🇬🇧', 'de': '🇩🇪', 'fr': '🇫🇷', 'es': '🇪🇸',
+    'en': '🇺🇸', 'en-gb': '🇬🇧', 'en-au': '🇦🇺', 'en-ca': '🇨🇦',
+    'de': '🇩🇪', 'fr': '🇫🇷', 'fr-ca': '🇨🇦', 'es': '🇪🇸', 'es-mx': '🇲🇽',
     'it': '🇮🇹', 'pt': '🇵🇹', 'pt-br': '🇧🇷', 'nl': '🇳🇱', 'ru': '🇷🇺',
-    'ja': '🇯🇵', 'ko': '🇰🇷', 'zh': '🇨🇳', 'zh-tw': '🇹🇼', 'ar': '🇸🇦',
-    'hi': '🇮🇳', 'tr': '🇹🇷', 'pl': '🇵🇱', 'sv': '🇸🇪', 'da': '🇩🇰',
-    'no': '🇳🇴', 'fi': '🇫🇮', 'th': '🇹🇭', 'vi': '🇻🇳', 'id': '🇮🇩',
-    'uk': '🇺🇦'
+    'ja': '🇯🇵', 'ko': '🇰🇷', 'zh': '🇨🇳', 'zh-tw': '🇹🇼', 'zh-hk': '🇭🇰',
+    'ar': '🇸🇦', 'hi': '🇮🇳', 'tr': '🇹🇷', 'pl': '🇵🇱', 'sv': '🇸🇪', 'da': '🇩🇰',
+    'no': '🇳🇴', 'fi': '🇫🇮', 'th': '🇹🇭', 'vi': '🇻🇳', 'id': '🇮🇩', 'ms': '🇲🇾',
+    'uk': '🇺🇦', 'cs': '🇨🇿', 'sk': '🇸🇰', 'hu': '🇭🇺', 'ro': '🇷🇴', 'bg': '🇧🇬',
+    'el': '🇬🇷', 'he': '🇮🇱', 'hr': '🇭🇷', 'sr': '🇷🇸', 'sl': '🇸🇮',
+    'lt': '🇱🇹', 'lv': '🇱🇻', 'et': '🇪🇪', 'ca': '🏴󠁥󠁳󠁣󠁴󠁿', 'fil': '🇵🇭',
+    'bn': '🇧🇩', 'ta': '🇮🇳', 'ur': '🇵🇰', 'fa': '🇮🇷',
+    'gu': '🇮🇳', 'kn': '🇮🇳', 'ml': '🇮🇳', 'mr': '🇮🇳', 'or': '🇮🇳', 'pa': '🇮🇳', 'te': '🇮🇳'
 };
+
+// Locales written right-to-left. Drives canvas text direction (headline,
+// subheadline, freeform text elements) and text input direction so Hebrew,
+// Urdu, Arabic, and Persian copy render and edit correctly.
+const RTL_LANGUAGES = new Set(['ar', 'he', 'ur', 'fa']);
+
+function isRtlLanguage(lang) {
+    if (!lang) return false;
+    const base = lang.split('-')[0].toLowerCase();
+    return RTL_LANGUAGES.has(base);
+}
+
+// Set a form field's text direction to match a language, so typing/editing
+// RTL copy (Hebrew, Urdu) aligns and flows correctly.
+function applyFieldDirection(elementId, lang) {
+    const el = document.getElementById(elementId);
+    if (el) el.dir = isRtlLanguage(lang) ? 'rtl' : 'ltr';
+}
+
+// Custom locales the user has added, persisted separately from the built-in
+// dictionary above so they survive across the built-in list changing.
+const CUSTOM_LANGUAGES_STORAGE_KEY = 'customLanguages';
+
+function loadCustomLanguages() {
+    try {
+        const raw = localStorage.getItem(CUSTOM_LANGUAGES_STORAGE_KEY);
+        if (!raw) return;
+        const custom = JSON.parse(raw);
+        Object.keys(custom).forEach(code => {
+            const entry = custom[code];
+            if (!entry || !entry.name) return;
+            languageNames[code] = entry.name;
+            languageFlags[code] = entry.flag || '🏳️';
+        });
+    } catch (e) {
+        console.error('Failed to load custom languages:', e);
+    }
+}
+
+function getCustomLanguages() {
+    try {
+        return JSON.parse(localStorage.getItem(CUSTOM_LANGUAGES_STORAGE_KEY) || '{}');
+    } catch (e) {
+        return {};
+    }
+}
+
+// Add a user-defined locale (e.g. a market not covered by the built-in list)
+// Returns { success, error }
+function saveCustomLanguage(code, name, flag) {
+    code = (code || '').trim().toLowerCase();
+    name = (name || '').trim();
+    flag = (flag || '').trim() || '🏳️';
+
+    if (!/^[a-z]{2,3}(-[a-z0-9]{2,4})?$/.test(code)) {
+        return { success: false, error: 'Use a locale code like "de", "es-mx", or "yue".' };
+    }
+    if (!name) {
+        return { success: false, error: 'Please enter a display name for the language.' };
+    }
+    if (languageNames[code] && !getCustomLanguages()[code]) {
+        return { success: false, error: `"${code}" is already a built-in language.` };
+    }
+
+    const custom = getCustomLanguages();
+    custom[code] = { name, flag };
+    localStorage.setItem(CUSTOM_LANGUAGES_STORAGE_KEY, JSON.stringify(custom));
+
+    languageNames[code] = name;
+    languageFlags[code] = flag;
+
+    return { success: true, code };
+}
 
 // Google Fonts configuration
 const googleFonts = {
@@ -2231,6 +2312,7 @@ function syncUIWithState() {
     const layoutSettings = getEffectiveLayout(txt, layoutLang);
     const currentHeadline = txt.headlines ? (txt.headlines[headlineLang] || '') : (txt.headline || '');
     document.getElementById('headline-text').value = currentHeadline;
+    applyFieldDirection('headline-text', headlineLang);
     document.getElementById('headline-font').value = txt.headlineFont;
     updateFontPickerPreview();
     document.getElementById('headline-size').value = headlineLayout.headlineSize;
@@ -2251,6 +2333,7 @@ function syncUIWithState() {
     document.getElementById('line-height-value').textContent = formatValue(layoutSettings.lineHeight) + '%';
     const currentSubheadline = txt.subheadlines ? (txt.subheadlines[subheadlineLang] || '') : (txt.subheadline || '');
     document.getElementById('subheadline-text').value = currentSubheadline;
+    applyFieldDirection('subheadline-text', subheadlineLang);
     document.getElementById('subheadline-font').value = txt.subheadlineFont || txt.headlineFont;
     document.getElementById('subheadline-size').value = subheadlineLayout.subheadlineSize;
     document.getElementById('subheadline-color').value = txt.subheadlineColor;
@@ -2449,6 +2532,7 @@ function updateElementProperties() {
     if (el.type === 'text') {
         textProps.style.display = '';
         document.getElementById('element-text-input').value = getElementText(el);
+        applyFieldDirection('element-text-input', state.currentLanguage);
         document.getElementById('element-font').value = el.font;
         updateElementFontPickerPreview(el);
         document.getElementById('element-font-size').value = el.fontSize;
@@ -3924,11 +4008,20 @@ function setupEventListeners() {
         if (e.target.id === 'languages-modal') closeLanguagesModal();
     });
 
-    document.getElementById('add-language-select').addEventListener('change', (e) => {
-        if (e.target.value) {
-            addProjectLanguage(e.target.value);
-            e.target.value = '';
+    document.getElementById('add-language-select').addEventListener('change', async (e) => {
+        const value = e.target.value;
+        e.target.value = '';
+        if (!value) return;
+
+        if (value === '__custom__') {
+            const newCode = await showAddCustomLanguageDialog();
+            if (newCode) {
+                addProjectLanguage(newCode);
+            }
+            return;
         }
+
+        addProjectLanguage(value);
     });
 
     // Screenshot translations modal events
@@ -4800,16 +4893,81 @@ function updateAddLanguageSelect() {
     const select = document.getElementById('add-language-select');
     select.innerHTML = '<option value="">Add a language...</option>';
 
-    // Add all available languages that aren't already in the project
-    Object.keys(languageNames).forEach(lang => {
-        if (!state.projectLanguages.includes(lang)) {
-            const flag = languageFlags[lang] || '🏳️';
-            const name = languageNames[lang];
-            const option = document.createElement('option');
-            option.value = lang;
-            option.textContent = `${flag} ${name}`;
-            select.appendChild(option);
-        }
+    // Add all available languages that aren't already in the project,
+    // sorted alphabetically by display name so the larger list stays scannable
+    const available = Object.keys(languageNames)
+        .filter(lang => !state.projectLanguages.includes(lang))
+        .sort((a, b) => languageNames[a].localeCompare(languageNames[b]));
+
+    available.forEach(lang => {
+        const flag = languageFlags[lang] || '🏳️';
+        const name = languageNames[lang];
+        const option = document.createElement('option');
+        option.value = lang;
+        option.textContent = `${flag} ${name}`;
+        select.appendChild(option);
+    });
+
+    const customOption = document.createElement('option');
+    customOption.value = '__custom__';
+    customOption.textContent = '➕ Add custom language…';
+    select.appendChild(customOption);
+}
+
+// Dynamic dialog for adding a custom (non-built-in) locale
+function showAddCustomLanguageDialog() {
+    return new Promise((resolve) => {
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay visible';
+        overlay.innerHTML = `
+            <div class="modal" style="max-width: 340px;">
+                <h3 class="modal-title">Add Custom Language</h3>
+                <p class="modal-message" style="margin-bottom: 16px;">Add a locale that isn't in the built-in list, such as a regional dialect.</p>
+                <div style="margin-bottom: 12px;">
+                    <label style="display: block; font-size: 12px; color: var(--text-secondary); margin-bottom: 6px;">Locale code</label>
+                    <input id="custom-lang-code" type="text" placeholder="e.g. yue, de-at" maxlength="10" style="width: 100%; padding: 10px 12px; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 8px; color: var(--text-primary); font-size: 14px; box-sizing: border-box;">
+                </div>
+                <div style="margin-bottom: 12px;">
+                    <label style="display: block; font-size: 12px; color: var(--text-secondary); margin-bottom: 6px;">Display name</label>
+                    <input id="custom-lang-name" type="text" placeholder="e.g. Cantonese" maxlength="40" style="width: 100%; padding: 10px 12px; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 8px; color: var(--text-primary); font-size: 14px; box-sizing: border-box;">
+                </div>
+                <div style="margin-bottom: 16px;">
+                    <label style="display: block; font-size: 12px; color: var(--text-secondary); margin-bottom: 6px;">Flag emoji (optional)</label>
+                    <input id="custom-lang-flag" type="text" placeholder="🏳️" maxlength="8" style="width: 100%; padding: 10px 12px; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 8px; color: var(--text-primary); font-size: 14px; box-sizing: border-box;">
+                </div>
+                <p id="custom-lang-error" style="color: #ff453a; font-size: 12px; margin: 0 0 12px; display: none;"></p>
+                <div class="modal-buttons">
+                    <button class="modal-btn modal-btn-cancel" id="custom-lang-cancel">Cancel</button>
+                    <button class="modal-btn modal-btn-confirm" id="custom-lang-confirm" style="background: var(--accent);">Add Language</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(overlay);
+
+        const close = (result) => {
+            overlay.remove();
+            resolve(result);
+        };
+
+        overlay.querySelector('#custom-lang-cancel').addEventListener('click', () => close(null));
+        overlay.addEventListener('click', (e) => {
+            if (e.target === overlay) close(null);
+        });
+
+        overlay.querySelector('#custom-lang-confirm').addEventListener('click', () => {
+            const code = overlay.querySelector('#custom-lang-code').value;
+            const name = overlay.querySelector('#custom-lang-name').value;
+            const flag = overlay.querySelector('#custom-lang-flag').value;
+
+            const result = saveCustomLanguage(code, name, flag);
+            if (!result.success) {
+                const errorEl = overlay.querySelector('#custom-lang-error');
+                errorEl.textContent = result.error;
+                errorEl.style.display = 'block';
+                return;
+            }
+            close(result.code);
+        });
     });
 }
 
@@ -4998,14 +5156,24 @@ function updateSubheadlineLanguageUI() {
 let currentTranslateTarget = null;
 
 const languageNames = {
-    'en': 'English (US)', 'en-gb': 'English (UK)', 'de': 'German', 'fr': 'French',
-    'es': 'Spanish', 'it': 'Italian', 'pt': 'Portuguese', 'pt-br': 'Portuguese (BR)',
-    'nl': 'Dutch', 'ru': 'Russian', 'ja': 'Japanese', 'ko': 'Korean',
-    'zh': 'Chinese (Simplified)', 'zh-tw': 'Chinese (Traditional)', 'ar': 'Arabic',
-    'hi': 'Hindi', 'tr': 'Turkish', 'pl': 'Polish', 'sv': 'Swedish',
+    'en': 'English (US)', 'en-gb': 'English (UK)', 'en-au': 'English (Australia)',
+    'en-ca': 'English (Canada)', 'de': 'German', 'fr': 'French', 'fr-ca': 'French (Canada)',
+    'es': 'Spanish', 'es-mx': 'Spanish (Mexico)', 'it': 'Italian', 'pt': 'Portuguese',
+    'pt-br': 'Portuguese (BR)', 'nl': 'Dutch', 'ru': 'Russian', 'ja': 'Japanese', 'ko': 'Korean',
+    'zh': 'Chinese (Simplified)', 'zh-tw': 'Chinese (Traditional)', 'zh-hk': 'Chinese (Hong Kong)',
+    'ar': 'Arabic', 'hi': 'Hindi', 'tr': 'Turkish', 'pl': 'Polish', 'sv': 'Swedish',
     'da': 'Danish', 'no': 'Norwegian', 'fi': 'Finnish', 'th': 'Thai',
-    'vi': 'Vietnamese', 'id': 'Indonesian', 'uk': 'Ukrainian'
+    'vi': 'Vietnamese', 'id': 'Indonesian', 'ms': 'Malay', 'uk': 'Ukrainian',
+    'cs': 'Czech', 'sk': 'Slovak', 'hu': 'Hungarian', 'ro': 'Romanian', 'bg': 'Bulgarian',
+    'el': 'Greek', 'he': 'Hebrew', 'hr': 'Croatian', 'sr': 'Serbian', 'sl': 'Slovenian',
+    'lt': 'Lithuanian', 'lv': 'Latvian', 'et': 'Estonian', 'ca': 'Catalan', 'fil': 'Filipino',
+    'bn': 'Bangla', 'ta': 'Tamil', 'ur': 'Urdu', 'fa': 'Persian',
+    'gu': 'Gujarati', 'kn': 'Kannada', 'ml': 'Malayalam', 'mr': 'Marathi',
+    'or': 'Odia', 'pa': 'Punjabi', 'te': 'Telugu'
 };
+
+// Merge any user-added custom locales into the dictionaries above
+loadCustomLanguages();
 
 function openTranslateModal(target) {
     currentTranslateTarget = target;
@@ -5054,7 +5222,7 @@ function openTranslateModal(target) {
                 <span class="flag">${languageFlags[lang]}</span>
                 <span>${languageNames[lang] || lang}</span>
             </div>
-            <textarea placeholder="Enter ${languageNames[lang] || lang} translation...">${texts[lang] || ''}</textarea>
+            <textarea placeholder="Enter ${languageNames[lang] || lang} translation..." dir="${isRtlLanguage(lang) ? 'rtl' : 'ltr'}">${texts[lang] || ''}</textarea>
         `;
         targetsContainer.appendChild(item);
     });
@@ -5093,6 +5261,7 @@ function applyTranslations() {
         });
         el.text = getElementText(el); // sync for backwards compat
         document.getElementById('element-text-input').value = getElementText(el);
+        applyFieldDirection('element-text-input', state.currentLanguage);
     } else {
         const text = getTextSettings();
         const isHeadline = currentTranslateTarget === 'headline';
@@ -5107,8 +5276,10 @@ function applyTranslations() {
         const currentLang = isHeadline ? text.currentHeadlineLang : text.currentSubheadlineLang;
         if (isHeadline) {
             document.getElementById('headline-text').value = texts[currentLang] || '';
+            applyFieldDirection('headline-text', currentLang);
         } else {
             document.getElementById('subheadline-text').value = texts[currentLang] || '';
+            applyFieldDirection('subheadline-text', currentLang);
             text.subheadlineEnabled = true;
             syncUIWithState();
         }
@@ -5189,6 +5360,7 @@ The text is a short marketing headline/tagline for an app that must fit on a scr
 - Marketing-focused and compelling
 - Culturally appropriate for each target market
 - Natural-sounding in each language
+- Formatting tokens preserved EXACTLY as written and in the same position: line breaks (\n), emoji, placeholders like {name}/%s/{{var}}, numerals, units, and ALL-CAPS brand/product names must never be translated, reworded, or dropped
 
 IMPORTANT: The translated text will be displayed on app screenshots with limited space. If the source text is short, the translation MUST also be short. Prioritize brevity over literal accuracy.
 
@@ -5584,6 +5756,7 @@ CONTEXT: These are marketing texts for app store screenshots. Each screenshot ha
 - Marketing-focused and compelling language
 - Culturally appropriate for each target market
 - Natural-sounding in each language
+- Formatting tokens preserved EXACTLY as written and in the same position: line breaks (\n), emoji, placeholders like {name}/%s/{{var}}, numerals, units, and ALL-CAPS brand/product names must never be translated, reworded, or dropped
 
 IMPORTANT: The translated text will be displayed on app screenshots with limited space. If the source text is short, the translation MUST also be short. Prioritize brevity over literal accuracy.
 
@@ -5696,7 +5869,9 @@ async function translateWithAnthropic(apiKey, prompt) {
         },
         body: JSON.stringify({
             model: model,
-            max_tokens: 4096,
+            // Higher ceiling than a single-language translation needs, since bulk
+            // "translate all" requests can target dozens of project languages at once.
+            max_tokens: 8192,
             messages: [{ role: "user", content: prompt }]
         })
     });
@@ -5952,6 +6127,7 @@ function updateTextUI(text) {
     const subheadlineText = text.subheadlines ? (text.subheadlines[subheadlineLang] || '') : (text.subheadline || '');
 
     document.getElementById('headline-text').value = headlineText;
+    applyFieldDirection('headline-text', headlineLang);
     document.getElementById('headline-font').value = text.headlineFont;
     updateFontPickerPreview();
     document.getElementById('headline-size').value = headlineLayout.headlineSize;
@@ -5971,6 +6147,7 @@ function updateTextUI(text) {
     document.getElementById('line-height').value = layoutSettings.lineHeight;
     document.getElementById('line-height-value').textContent = formatValue(layoutSettings.lineHeight) + '%';
     document.getElementById('subheadline-text').value = subheadlineText;
+    applyFieldDirection('subheadline-text', subheadlineLang);
     document.getElementById('subheadline-font').value = text.subheadlineFont || text.headlineFont;
     document.getElementById('subheadline-size').value = subheadlineLayout.subheadlineSize;
     document.getElementById('subheadline-color').value = text.subheadlineColor;
@@ -7329,6 +7506,7 @@ function drawTextToContext(context, dims, txt) {
         const fontStyle = txt.headlineItalic ? 'italic' : 'normal';
         context.font = `${fontStyle} ${txt.headlineWeight} ${headlineLayout.headlineSize}px ${txt.headlineFont}`;
         context.fillStyle = txt.headlineColor;
+        context.direction = isRtlLanguage(headlineLang) ? 'rtl' : 'ltr';
 
         const lines = wrapText(context, headline, dims.width - padding * 2);
         const lineHeight = headlineLayout.headlineSize * (layoutSettings.lineHeight / 100);
@@ -7386,6 +7564,7 @@ function drawTextToContext(context, dims, txt) {
         const subWeight = txt.subheadlineWeight || '400';
         context.font = `${subFontStyle} ${subWeight} ${subheadlineLayout.subheadlineSize}px ${txt.subheadlineFont || txt.headlineFont}`;
         context.fillStyle = hexToRgba(txt.subheadlineColor, txt.subheadlineOpacity / 100);
+        context.direction = isRtlLanguage(subheadlineLang) ? 'rtl' : 'ltr';
 
         const lines = wrapText(context, subheadline, dims.width - padding * 2);
         const subLineHeight = subheadlineLayout.subheadlineSize * 1.4;
@@ -7489,6 +7668,7 @@ function drawElementsToContext(context, dims, elements, layer) {
             context.fillStyle = el.fontColor;
             context.textAlign = 'center';
             context.textBaseline = 'middle';
+            context.direction = isRtlLanguage(state.currentLanguage) ? 'rtl' : 'ltr';
 
             // Word-wrap text within element width (respects manual line breaks)
             const lines = wrapText(context, elText, elWidth);
@@ -7924,6 +8104,7 @@ function drawText() {
         const fontStyle = text.headlineItalic ? 'italic' : 'normal';
         ctx.font = `${fontStyle} ${text.headlineWeight} ${headlineLayout.headlineSize}px ${text.headlineFont}`;
         ctx.fillStyle = text.headlineColor;
+        ctx.direction = isRtlLanguage(headlineLang) ? 'rtl' : 'ltr';
 
         const lines = wrapText(ctx, headline, dims.width - padding * 2);
         const lineHeight = headlineLayout.headlineSize * (layoutSettings.lineHeight / 100);
@@ -7981,6 +8162,7 @@ function drawText() {
         const subWeight = text.subheadlineWeight || '400';
         ctx.font = `${subFontStyle} ${subWeight} ${subheadlineLayout.subheadlineSize}px ${text.subheadlineFont || text.headlineFont}`;
         ctx.fillStyle = hexToRgba(text.subheadlineColor, text.subheadlineOpacity / 100);
+        ctx.direction = isRtlLanguage(subheadlineLang) ? 'rtl' : 'ltr';
 
         const lines = wrapText(ctx, subheadline, dims.width - padding * 2);
         const subLineHeight = subheadlineLayout.subheadlineSize * 1.4;
@@ -8051,6 +8233,27 @@ function roundRect(ctx, x, y, width, height, radius) {
     ctx.closePath();
 }
 
+// Break a single "word" that's wider than maxWidth into character chunks.
+// Needed for two cases that would otherwise overflow the canvas horizontally:
+// long compound words (German, etc.) and scripts written without spaces
+// between words (Chinese, Japanese, Thai), where a whole line can arrive
+// here as one unbreakable "word".
+function breakLongWord(ctx, word, maxWidth) {
+    const chunks = [];
+    let chunk = '';
+    for (const char of word) {
+        const testChunk = chunk + char;
+        if (ctx.measureText(testChunk).width > maxWidth && chunk) {
+            chunks.push(chunk);
+            chunk = char;
+        } else {
+            chunk = testChunk;
+        }
+    }
+    if (chunk) chunks.push(chunk);
+    return chunks;
+}
+
 function wrapText(ctx, text, maxWidth) {
     const lines = [];
     const rawLines = String(text).split(/\r?\n/);
@@ -8065,6 +8268,19 @@ function wrapText(ctx, text, maxWidth) {
         let currentLine = '';
 
         words.forEach(word => {
+            // Word alone doesn't fit even on an empty line - force-break it
+            // by character instead of letting it overflow maxWidth.
+            if (ctx.measureText(word).width > maxWidth) {
+                if (currentLine) {
+                    lines.push(currentLine);
+                    currentLine = '';
+                }
+                const chunks = breakLongWord(ctx, word, maxWidth);
+                chunks.slice(0, -1).forEach(c => lines.push(c));
+                currentLine = chunks[chunks.length - 1] || '';
+                return;
+            }
+
             const testLine = currentLine + (currentLine ? ' ' : '') + word;
             const metrics = ctx.measureText(testLine);
 
