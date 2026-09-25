@@ -17,10 +17,14 @@ COPY three-renderer.js /usr/share/nginx/html/
 COPY language-utils.js /usr/share/nginx/html/
 COPY magical-titles.js /usr/share/nginx/html/
 COPY llm.js /usr/share/nginx/html/
+COPY lucide-icons.js /usr/share/nginx/html/
 
 # Copy assets
 COPY models/ /usr/share/nginx/html/models/
 COPY img/ /usr/share/nginx/html/img/
+
+# Make sure nginx can read everything regardless of host file permissions
+RUN chmod -R a+rX /usr/share/nginx/html
 
 # Copy custom nginx configuration for SPA and caching
 COPY nginx.conf /etc/nginx/conf.d/default.conf

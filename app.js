@@ -5236,6 +5236,8 @@ Translate to these language codes: ${targetLangs.join(', ')}`;
 
         if (error.message === 'Failed to fetch') {
             setTranslateStatus('Connection failed. Check your API key in Settings.', 'error');
+        } else if (error.message.startsWith('Gemini ')) {
+            setTranslateStatus(error.message, 'error');
         } else if (error.message === 'AI_UNAVAILABLE' || error.message.includes('401') || error.message.includes('403')) {
             setTranslateStatus('Invalid API key. Update it in Settings (gear icon).', 'error');
         } else {
@@ -5671,6 +5673,8 @@ Translate to these language codes: ${targetLangs.join(', ')}`;
 
         if (error.message === 'Failed to fetch') {
             await showAppAlert('Connection failed. Check your API key in Settings.', 'error');
+        } else if (error.message.startsWith('Gemini ')) {
+            await showAppAlert(error.message, 'error');
         } else if (error.message === 'AI_UNAVAILABLE' || error.message.includes('401') || error.message.includes('403')) {
             await showAppAlert('Invalid API key. Update it in Settings (gear icon).', 'error');
         } else {
@@ -5740,10 +5744,11 @@ async function translateWithOpenAI(apiKey, prompt) {
 
 async function translateWithGoogle(apiKey, prompt) {
     const model = getSelectedModel('google');
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, {
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
         method: "POST",
         headers: {
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "x-goog-api-key": apiKey
         },
         body: JSON.stringify({
             contents: [{ parts: [{ text: prompt }] }]
@@ -5752,12 +5757,21 @@ async function translateWithGoogle(apiKey, prompt) {
 
     if (!response.ok) {
         const status = response.status;
-        if (status === 401 || status === 403 || status === 400) throw new Error('AI_UNAVAILABLE');
-        throw new Error(`API request failed: ${status}`);
+        let detail = '';
+        try { const err = await response.json(); detail = err?.error?.message || JSON.stringify(err); }
+        catch (_) { detail = response.statusText; }
+        console.error('Gemini API error', status, detail);
+        throw new Error(`Gemini ${status}: ${detail}`);
     }
 
     const data = await response.json();
-    return data.candidates[0].content.parts[0].text;
+    const parts = data?.candidates?.[0]?.content?.parts || [];
+    const text = parts.filter(p => p.text && !p.thought).map(p => p.text).join('');
+    if (!text) {
+        const reason = data?.candidates?.[0]?.finishReason || data?.promptFeedback?.blockReason || 'empty response';
+        throw new Error(`Gemini returned no text (${reason})`);
+    }
+    return text;
 }
 
 function setTranslateStatus(message, type) {

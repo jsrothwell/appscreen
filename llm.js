@@ -28,17 +28,17 @@ const llmProviders = {
     },
     google: {
         name: 'Google (Gemini)',
-        keyPrefix: 'AIza',
+        keyPrefix: '', // accept both legacy (AIza...) and current Gemini key formats
         storageKey: 'googleApiKey',
         modelStorageKey: 'googleModel',
         models: [
-            { id: 'gemini-3-flash-preview', name: 'Gemini 3 Flash (Preview) ($$)' },
-            { id: 'gemini-3-pro-preview', name: 'Gemini 3 Pro (Preview) ($$$)' },
-            { id: 'gemini-2.5-flash-lite', name: 'Gemini 2.5 Flash-Lite ($)' },
-            { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash ($$)' },
-            { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro ($$$)' }
+            { id: 'gemini-3.5-flash-lite', name: 'Gemini 3.5 Flash-Lite ($)' },
+            { id: 'gemini-3.1-flash-lite', name: 'Gemini 3.1 Flash-Lite ($)' },
+            { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash ($$)' },
+            { id: 'gemini-3.5-flash', name: 'Gemini 3.5 Flash ($$)' },
+            { id: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro (Preview) ($$$)' }
         ],
-        defaultModel: 'gemini-2.5-flash'
+        defaultModel: 'gemini-3.8-flash'
     }
 };
 
@@ -50,7 +50,8 @@ const llmProviders = {
 function getSelectedModel(provider) {
     const config = llmProviders[provider];
     if (!config) return null;
-    return localStorage.getItem(config.modelStorageKey) || config.defaultModel;
+    const saved = localStorage.getItem(config.modelStorageKey);
+    return config.models.some(m => m.id === saved) ? saved : config.defaultModel;
 }
 
 /**
