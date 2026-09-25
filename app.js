@@ -37,6 +37,7 @@ const state = {
             cornerRadius: 24,
             use3D: false,
             device3D: 'iphone',
+            frameColor: null, // 3D device frame color preset id (see frameColorPresets); null = model's native color
             rotation3D: { x: 0, y: 0, z: 0 },
             shadow: {
                 enabled: true,
@@ -98,6 +99,12 @@ const state = {
 };
 
 const baseTextDefaults = JSON.parse(JSON.stringify(state.defaults.text));
+
+// Single source of truth for the factory-fresh project defaults, captured
+// once at load time. resetStateToDefaults() (new/switched projects) clones
+// from this instead of maintaining its own copy of the schema, which had
+// drifted out of sync (missing use3D/device3D/frameColor/elements/popouts).
+const FACTORY_DEFAULTS = JSON.parse(JSON.stringify(state.defaults));
 
 // Runtime-only state (not persisted)
 let selectedElementId = null;
@@ -579,13 +586,24 @@ function setTextSetting(key, value) {
     }
 }
 
+// Make the current screenshot's background/device/text style the project's
+// baseline default, so screens added later (upload, blank, import) start
+// from it instead of the hardcoded factory defaults.
 function setCurrentScreenshotAsDefault() {
     const screenshot = getCurrentScreenshot();
-    if (screenshot) {
-        state.defaults.background = JSON.parse(JSON.stringify(screenshot.background));
-        state.defaults.screenshot = JSON.parse(JSON.stringify(screenshot.screenshot));
-        state.defaults.text = JSON.parse(JSON.stringify(screenshot.text));
+    if (!screenshot) return false;
+
+    state.defaults.background = JSON.parse(JSON.stringify(screenshot.background));
+    // Image objects aren't JSON-serializable - reattach the real reference
+    // after the deep clone (same pattern used by transferStyle/applyStyleToAll).
+    if (screenshot.background.image) {
+        state.defaults.background.image = screenshot.background.image;
     }
+    state.defaults.screenshot = JSON.parse(JSON.stringify(screenshot.screenshot));
+    state.defaults.text = JSON.parse(JSON.stringify(screenshot.text));
+
+    saveState();
+    return true;
 }
 
 // Language flags mapping
@@ -1930,87 +1948,9 @@ function resetStateToDefaults() {
     state.customHeight = 2868;
     state.currentLanguage = 'en';
     state.projectLanguages = ['en'];
-    state.defaults = {
-        background: {
-            type: 'gradient',
-            gradient: {
-                angle: 135,
-                stops: [
-                    { color: '#667eea', position: 0 },
-                    { color: '#764ba2', position: 100 }
-                ]
-            },
-            solid: '#1a1a2e',
-            image: null,
-            imageFit: 'cover',
-            imageBlur: 0,
-            overlayColor: '#000000',
-            overlayOpacity: 0,
-            noise: false,
-            noiseIntensity: 10
-        },
-        screenshot: {
-            scale: 70,
-            y: 60,
-            x: 50,
-            rotation: 0,
-            perspective: 0,
-            cornerRadius: 24,
-            shadow: {
-                enabled: true,
-                color: '#000000',
-                blur: 40,
-                opacity: 30,
-                x: 0,
-                y: 20
-            },
-            frame: {
-                enabled: false,
-                color: '#1d1d1f',
-                width: 12,
-                opacity: 100
-            }
-        },
-        text: {
-            headlineEnabled: true,
-            headlines: { en: '' },
-            headlineLanguages: ['en'],
-            currentHeadlineLang: 'en',
-            headlineFont: "-apple-system, BlinkMacSystemFont, 'SF Pro Display'",
-            headlineSize: 100,
-            headlineWeight: '600',
-            headlineItalic: false,
-            headlineUnderline: false,
-            headlineStrikethrough: false,
-            headlineColor: '#ffffff',
-            perLanguageLayout: false,
-            languageSettings: {
-                en: {
-                    headlineSize: 100,
-                    subheadlineSize: 50,
-                    position: 'top',
-                    offsetY: 12,
-                    lineHeight: 110
-                }
-            },
-            currentLayoutLang: 'en',
-            position: 'top',
-            offsetY: 12,
-            lineHeight: 110,
-            subheadlineEnabled: false,
-            subheadlines: { en: '' },
-            subheadlineLanguages: ['en'],
-            currentSubheadlineLang: 'en',
-            subheadlineFont: "-apple-system, BlinkMacSystemFont, 'SF Pro Display'",
-            subheadlineSize: 50,
-            subheadlineWeight: '400',
-            subheadlineItalic: false,
-            subheadlineUnderline: false,
-            subheadlineStrikethrough: false,
-            subheadlineColor: '#ffffff',
-            subheadlineOpacity: 70
-        }
-    };
+    // Clone from the single canonical schema instead of a hand-copied
+    // literal, so this never drifts out of sync again.
+    state.defaults = JSON.parse(JSON.stringify(FACTORY_DEFAULTS));
 }
 
 // Switch to a different project
@@ -3730,23 +3670,6 @@ function setupEventListeners() {
         }
     });
 
-    // Set as Default button (commented out)
-    // document.getElementById('set-as-default-btn').addEventListener('click', () => {
-    //     if (state.screenshots.length === 0) return;
-    //     setCurrentScreenshotAsDefault();
-    //     // Show brief confirmation
-    //     const btn = document.getElementById('set-as-default-btn');
-    //     const originalText = btn.textContent;
-    //     btn.textContent = 'Saved!';
-    //     btn.style.borderColor = 'var(--accent)';
-    //     btn.style.color = 'var(--accent)';
-    //     setTimeout(() => {
-    //         btn.textContent = originalText;
-    //         btn.style.borderColor = '';
-    //         btn.style.color = '';
-    //     }, 1500);
-    // });
-
     // Project dropdown
     const projectDropdown = document.getElementById('project-dropdown');
     const projectTrigger = document.getElementById('project-trigger');
@@ -5432,6 +5355,46 @@ Translate to these language codes: ${targetLangs.join(', ')}`;
     }
 }
 
+// Brief, non-blocking confirmation pill (e.g. "Project defaults updated").
+// Unlike showAppAlert, it doesn't wait for a click - it just auto-dismisses.
+function showToast(message) {
+    const existing = document.getElementById('app-toast');
+    if (existing) existing.remove();
+
+    const toast = document.createElement('div');
+    toast.id = 'app-toast';
+    toast.textContent = message;
+    toast.style.cssText = `
+        position: fixed;
+        bottom: 24px;
+        left: 50%;
+        transform: translateX(-50%) translateY(0);
+        background: var(--bg-secondary);
+        color: var(--text-primary);
+        border: 1px solid var(--border-color);
+        border-radius: 10px;
+        padding: 10px 18px;
+        font-size: 13px;
+        box-shadow: 0 10px 40px var(--shadow-color);
+        z-index: 3000;
+        opacity: 0;
+        transition: opacity 0.2s, transform 0.2s;
+        pointer-events: none;
+    `;
+    document.body.appendChild(toast);
+
+    requestAnimationFrame(() => {
+        toast.style.opacity = '1';
+        toast.style.transform = 'translateX(-50%) translateY(-4px)';
+    });
+
+    setTimeout(() => {
+        toast.style.opacity = '0';
+        toast.style.transform = 'translateX(-50%) translateY(0)';
+        setTimeout(() => toast.remove(), 250);
+    }, 1800);
+}
+
 // Helper function to show styled alert modal
 function showAppAlert(message, type = 'info') {
     return new Promise((resolve) => {
@@ -6486,6 +6449,12 @@ function updateScreenshotList() {
                         </svg>
                         Apply style to all...
                     </button>
+                    <button class="screenshot-menu-item screenshot-set-default" data-index="${index}">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/>
+                        </svg>
+                        Set as project default
+                    </button>
                     <button class="screenshot-menu-item screenshot-duplicate" data-index="${index}">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <rect x="9" y="9" width="13" height="13" rx="2"/>
@@ -6714,6 +6683,25 @@ function updateScreenshotList() {
                 e.stopPropagation();
                 menu?.classList.remove('open');
                 showApplyStyleModal(index);
+            });
+        }
+
+        // Set as project default button handler - updates the baseline used
+        // by screens added later, without touching existing screenshots
+        const setDefaultBtn = item.querySelector('.screenshot-set-default');
+        if (setDefaultBtn) {
+            setDefaultBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                menu?.classList.remove('open');
+                const wasCurrent = index === state.selectedIndex;
+                const targetScreenshot = state.screenshots[index];
+                const previousSelection = state.selectedIndex;
+                if (!wasCurrent) state.selectedIndex = index;
+                const ok = setCurrentScreenshotAsDefault();
+                if (!wasCurrent) state.selectedIndex = previousSelection;
+                if (ok) {
+                    showToast(`"${targetScreenshot.name}" style set as the project default for new screens`);
+                }
             });
         }
 

@@ -520,30 +520,6 @@ html.tauri-app .right-sidebar {
     border-radius: 1px;
 }
 
-/* Set as Default button */
-.set-default-btn {
-    width: 100%;
-    padding: 8px 12px;
-    margin-top: 8px;
-    background: var(--bg-tertiary);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    color: var(--text-secondary);
-    font-size: 12px;
-    cursor: pointer;
-    transition: all 0.2s;
-}
-
-.set-default-btn:hover {
-    background: var(--bg-primary);
-    color: var(--text-primary);
-    border-color: var(--accent);
-}
-
-.set-default-btn:active {
-    transform: scale(0.98);
-}
-
 /* Controls */
 .control-group {
     margin-bottom: 20px;
