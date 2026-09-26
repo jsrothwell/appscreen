@@ -8504,21 +8504,35 @@ async function exportAllForLanguage(lang) {
     }
 }
 
-// Export all screenshots for all languages.
-// Generates and downloads a SEPARATE zip per language rather than one giant
-// archive with per-language folders. Bundling every language's full-res
-// images into a single JSZip instance (and then materializing them all into
-// one in-memory Blob at the end) is what was pushing large projects into
-// out-of-memory crashes - each language's zip is now built, downloaded, and
-// released before moving to the next, so peak memory stays bounded to a
-// single language's worth of images regardless of project size.
+// Above this many total renders (languages x screenshots), a single combined
+// archive starts holding enough uncompressed image data in memory at once to
+// risk exhausting tab memory on large projects (measured ~594MB peak heap at
+// 200 renders/20 languages x 10 screenshots at full iPad resolution with
+// noise enabled - safely below this threshold; larger projects scale up
+// from there).
+const LARGE_EXPORT_ITEM_THRESHOLD = 300;
+
+// Export all screenshots for all languages. Normally produces ONE combined
+// zip with a per-language folder for each - matching the original UX. Only
+// once a project's total render count (languages x screenshots) crosses
+// LARGE_EXPORT_ITEM_THRESHOLD does it split the language list into two
+// roughly equal halves and generate/download two zips instead, halving peak
+// memory (each half is built, downloaded, and released before the next
+// starts) while still avoiding a separate download per language.
 async function exportAllLanguages() {
     const originalIndex = state.selectedIndex;
     const originalLang = state.currentLanguage;
     isExportingScreenshots = true;
 
-    const totalLangs = state.projectLanguages.length;
     const totalScreenshots = state.screenshots.length;
+    const totalLangs = state.projectLanguages.length;
+    const totalItems = totalLangs * totalScreenshots;
+
+    const shouldSplit = totalItems > LARGE_EXPORT_ITEM_THRESHOLD && totalLangs > 1;
+    const midpoint = Math.ceil(totalLangs / 2);
+    const languageGroups = shouldSplit
+        ? [state.projectLanguages.slice(0, midpoint), state.projectLanguages.slice(midpoint)]
+        : [state.projectLanguages];
 
     // Show progress
     showExportProgress('Exporting...', 'Preparing all languages', 0);
@@ -8530,43 +8544,54 @@ async function exportAllLanguages() {
     }));
 
     try {
-        for (let langIdx = 0; langIdx < state.projectLanguages.length; langIdx++) {
-            const lang = state.projectLanguages[langIdx];
-            const langName = languageNames[lang] || lang.toUpperCase();
-            const rangeStart = (langIdx / totalLangs) * 100;
-            const rangeSize = 100 / totalLangs;
-
-            // Temporarily switch to this language (images and text)
-            state.currentLanguage = lang;
-            state.screenshots.forEach(s => {
-                s.text.currentHeadlineLang = lang;
-                s.text.currentSubheadlineLang = lang;
-            });
+        for (let groupIdx = 0; groupIdx < languageGroups.length; groupIdx++) {
+            const groupLanguages = languageGroups[groupIdx];
+            const groupLabel = shouldSplit ? `Part ${groupIdx + 1}/${languageGroups.length}` : '';
+            const rangeStart = (groupIdx / languageGroups.length) * 100;
+            const rangeSize = 100 / languageGroups.length;
+            const groupItems = groupLanguages.length * totalScreenshots;
+            let groupCompleted = 0;
 
             const zip = new JSZip();
 
-            for (let i = 0; i < state.screenshots.length; i++) {
-                state.selectedIndex = i;
-                updateCanvas();
+            for (const lang of groupLanguages) {
+                const langName = languageNames[lang] || lang.toUpperCase();
 
-                const percent = rangeStart + ((i + 1) / totalScreenshots) * rangeSize * 0.9; // reserve last 10% of this language's slice for its ZIP
-                showExportProgress('Exporting...', `${langName}: Screenshot ${i + 1} of ${totalScreenshots}`, Math.round(percent));
+                // Temporarily switch to this language (images and text)
+                state.currentLanguage = lang;
+                state.screenshots.forEach(s => {
+                    s.text.currentHeadlineLang = lang;
+                    s.text.currentSubheadlineLang = lang;
+                });
 
-                await new Promise(resolve => setTimeout(resolve, 100));
+                for (let i = 0; i < state.screenshots.length; i++) {
+                    state.selectedIndex = i;
+                    updateCanvas();
 
-                const blob = await canvasToBlob(canvas);
-                zip.file(`screenshot-${i + 1}.png`, blob);
+                    groupCompleted++;
+                    const withinGroup = (groupCompleted / groupItems) * 0.9; // reserve last 10% of this group's slice for its ZIP
+                    const percent = rangeStart + withinGroup * rangeSize;
+                    const label = groupLabel ? `${groupLabel} - ${langName}` : langName;
+                    showExportProgress('Exporting...', `${label}: Screenshot ${i + 1} of ${totalScreenshots}`, Math.round(percent));
+
+                    await new Promise(resolve => setTimeout(resolve, 100));
+
+                    const blob = await canvasToBlob(canvas);
+                    zip.file(`${lang}/screenshot-${i + 1}.png`, blob);
+                }
             }
 
-            // Generate and download this language's ZIP before starting the next
-            showExportProgress('Generating ZIP...', langName, Math.round(rangeStart + rangeSize * 0.9));
+            // Generate and download this group's ZIP before starting the next
+            showExportProgress('Generating ZIP...', groupLabel, Math.round(rangeStart + rangeSize * 0.9));
             const content = await generateZipBlob(zip, (metadata) => {
                 const zipPercent = rangeStart + (0.9 + (metadata.percent / 100) * 0.1) * rangeSize;
-                showExportProgress('Generating ZIP...', `${langName}: ${metadata.currentFile || ''}`, Math.round(zipPercent));
+                const label = groupLabel ? `${groupLabel}: ${metadata.currentFile || ''}` : (metadata.currentFile || '');
+                showExportProgress('Generating ZIP...', label, Math.round(zipPercent));
             });
 
+            const suffix = shouldSplit ? `-part${groupIdx + 1}of${languageGroups.length}` : '';
             const link = document.createElement('a');
-            link.download = `screenshots_${state.outputDevice}_${lang}.zip`;
+            link.download = `screenshots_${state.outputDevice}_all-languages${suffix}.zip`;
             link.href = URL.createObjectURL(content);
             link.click();
             URL.revokeObjectURL(link.href);
