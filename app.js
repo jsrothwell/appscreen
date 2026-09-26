@@ -1371,6 +1371,7 @@ const canvasWrapper = document.getElementById('canvas-wrapper');
 
 let isSliding = false;
 let skipSidePreviewRender = false;  // Flag to skip re-rendering side previews after pre-render
+let isExportingScreenshots = false;  // Flag to skip side preview rendering during batch export (they're never used and are expensive with 3D)
 
 // Two-finger horizontal swipe to navigate between screenshots
 let swipeAccumulator = 0;
@@ -5291,6 +5292,7 @@ Source text (${languageNames[sourceLang]}):
 "${sourceText}"
 
 Respond ONLY with a valid JSON object mapping language codes to translations. Do not include any other text.
+Use standard ASCII double-quote characters (") as the JSON string delimiters for every key and value, even for languages that conventionally use other quotation marks (e.g. 「」, „", «») — those must never replace the JSON " delimiters, though they may still appear inside a translated string as literal punctuation if natural for that language.
 Example format:
 {"de": "German translation", "fr": "French translation"}
 
@@ -5306,10 +5308,13 @@ Translate to these language codes: ${targetLangs.join(', ')}`;
             responseText = await translateWithGoogle(apiKey, prompt);
         }
 
-        // Clean up response - remove markdown code blocks if present
-        responseText = responseText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-
-        const translations = JSON.parse(responseText);
+        let translations;
+        try {
+            translations = parseTranslationJSON(responseText);
+        } catch (parseError) {
+            console.error('JSON parse error. Response was:', responseText);
+            throw new Error('Failed to parse translation response. The AI may have returned invalid JSON.');
+        }
 
         // Apply translations to the textareas
         let translatedCount = 0;
@@ -5733,6 +5738,7 @@ Respond ONLY with a valid JSON object. The structure should be:
 }
 
 Where the keys (0, 1, etc.) correspond to the text indices [N] shown above.
+Use standard ASCII double-quote characters (") as the JSON string delimiters for every key and value, even for languages that conventionally use other quotation marks (e.g. 「」, „", «») — those must never replace the JSON " delimiters, though they may still appear inside a translated string as literal punctuation if natural for that language.
 Translate to these language codes: ${targetLangs.join(', ')}`;
 
         let responseText;
@@ -5747,20 +5753,11 @@ Translate to these language codes: ${targetLangs.join(', ')}`;
 
         updateStatus('Processing response...', 'Parsing translations');
 
-        // Clean up response - remove markdown code blocks and extract JSON
-        responseText = responseText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-
-        // Try to extract JSON object if there's extra text
-        const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-            responseText = jsonMatch[0];
-        }
-
         console.log('Translation response:', responseText.substring(0, 500) + (responseText.length > 500 ? '...' : ''));
 
         let translations;
         try {
-            translations = JSON.parse(responseText);
+            translations = parseTranslationJSON(responseText);
         } catch (parseError) {
             console.error('JSON parse error. Response was:', responseText);
             throw new Error('Failed to parse translation response. The AI may have returned incomplete text.');
@@ -5815,6 +5812,35 @@ Translate to these language codes: ${targetLangs.join(', ')}`;
             await showAppAlert('Invalid API key. Update it in Settings (gear icon).', 'error');
         } else {
             await showAppAlert('Translation failed: ' + error.message, 'error');
+        }
+    }
+}
+
+// Parses a translation API response as JSON, repairing the most common way
+// models corrupt it: swapping straight ASCII quotes for typographic/CJK
+// quote characters (e.g. "de":“Hallo” or "ja":「こんにちは」) as the JSON
+// string delimiters themselves, rather than as part of the text content.
+function parseTranslationJSON(responseText) {
+    let cleaned = responseText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+
+    const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+    if (jsonMatch) cleaned = jsonMatch[0];
+
+    try {
+        return JSON.parse(cleaned);
+    } catch (firstError) {
+        // Fallback: quote-delimiter characters only ever appear directly after
+        // a colon (opening) or directly before a comma/brace/bracket (closing)
+        // when a model has mistakenly used them as JSON syntax rather than
+        // literal content, so it's safe to normalize just those positions.
+        const quoteChars = '["“”„‟「」『』‘’]';
+        const repaired = cleaned
+            .replace(new RegExp(`:(\\s*)${quoteChars}`, 'g'), ':$1"')
+            .replace(new RegExp(`${quoteChars}(\\s*)([,}\\]])`, 'g'), '"$1$2');
+        try {
+            return JSON.parse(repaired);
+        } catch {
+            throw firstError;
         }
     }
 }
@@ -6977,7 +7003,18 @@ function getCanvasDimensions() {
 }
 
 function updateCanvas() {
-    saveState(); // Persist state on every update
+    // Skipped during batch export: saveState() re-serializes every
+    // screenshot's full base64 image data and writes it to IndexedDB on
+    // every call. During export updateCanvas() runs once per screenshot per
+    // language (hundreds of times for a multi-language project), so this
+    // was queuing hundreds of redundant full-project writes - each holding
+    // a duplicate copy of all image data in memory until IndexedDB flushed
+    // it - which is what was building up to the eventual out-of-memory
+    // allocation failure. The export loop restores and re-saves the real
+    // state once it's done, so nothing is lost by skipping it here.
+    if (!isExportingScreenshots) {
+        saveState(); // Persist state on every update
+    }
     const dims = getCanvasDimensions();
     canvas.width = dims.width;
     canvas.height = dims.height;
@@ -7030,8 +7067,11 @@ function updateCanvas() {
     // Elements above text
     drawElements(ctx, dims, 'above-text');
 
-    // Update side previews
-    updateSidePreviews();
+    // Update side previews (skipped during batch export - they're never used
+    // and re-rendering them, incl. 3D textures, per exported screenshot is expensive)
+    if (!isExportingScreenshots) {
+        updateSidePreviews();
+    }
 }
 
 function updateSidePreviews() {
@@ -8296,6 +8336,44 @@ function hexToRgba(hex, alpha) {
     return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
+// Captures the export canvas as a Blob instead of a base64 data URL string.
+// Blobs avoid the ~33% size inflation and extra encode/decode pass of
+// base64, which matters a lot when batching many full-resolution PNGs into
+// a ZIP - the base64 approach was pushing large multi-language exports into
+// out-of-memory territory.
+function canvasToBlob(sourceCanvas) {
+    return new Promise((resolve, reject) => {
+        sourceCanvas.toBlob((blob) => {
+            if (blob) resolve(blob);
+            else reject(new Error('Failed to read canvas as a PNG blob'));
+        }, 'image/png');
+    });
+}
+
+// Generates the ZIP via JSZip's low-memory streaming API instead of
+// generateAsync(). generateAsync builds the whole archive as ONE contiguous
+// buffer at the end (allocating a second full-size copy while concatenating
+// every file's data into it) - that's the exact step that was crashing tabs
+// with "Paused before potential out-of-memory crash" on larger exports.
+// generateInternalStream emits the archive in bounded chunks as it's built,
+// which we collect into a Blob (browsers assemble multi-part Blobs without
+// needing one big contiguous JS-heap copy) - same output, far lower peak memory.
+function generateZipBlob(zip, onProgress) {
+    return new Promise((resolve, reject) => {
+        const chunks = [];
+        zip.generateInternalStream({ type: 'blob', streamFiles: true })
+            .on('data', (data, metadata) => {
+                chunks.push(data);
+                if (onProgress) onProgress(metadata);
+            })
+            .on('error', (err) => reject(err))
+            .on('end', () => {
+                resolve(new Blob(chunks, { type: 'application/zip' }));
+            })
+            .resume();
+    });
+}
+
 async function exportCurrent() {
     if (state.screenshots.length === 0) {
         await showAppAlert('Please upload a screenshot first', 'info');
@@ -8360,6 +8438,7 @@ async function exportAllForLanguage(lang) {
     const originalLang = state.currentLanguage;
     const zip = new JSZip();
     const total = state.screenshots.length;
+    isExportingScreenshots = true;
 
     // Show progress
     const langName = languageNames[lang] || lang.toUpperCase();
@@ -8371,79 +8450,8 @@ async function exportAllForLanguage(lang) {
         subheadline: s.text.currentSubheadlineLang
     }));
 
-    // Temporarily switch to the target language (images and text)
-    state.currentLanguage = lang;
-    state.screenshots.forEach(s => {
-        s.text.currentHeadlineLang = lang;
-        s.text.currentSubheadlineLang = lang;
-    });
-
-    for (let i = 0; i < state.screenshots.length; i++) {
-        state.selectedIndex = i;
-        updateCanvas();
-
-        // Update progress
-        const percent = Math.round(((i + 1) / total) * 90); // Reserve 10% for ZIP generation
-        showExportProgress('Exporting...', `Screenshot ${i + 1} of ${total}`, percent);
-
-        await new Promise(resolve => setTimeout(resolve, 100));
-
-        // Get canvas data as base64, strip the data URL prefix
-        const dataUrl = canvas.toDataURL('image/png');
-        const base64Data = dataUrl.replace(/^data:image\/png;base64,/, '');
-
-        zip.file(`screenshot-${i + 1}.png`, base64Data, { base64: true });
-    }
-
-    // Restore original settings
-    state.selectedIndex = originalIndex;
-    state.currentLanguage = originalLang;
-    state.screenshots.forEach((s, i) => {
-        s.text.currentHeadlineLang = originalTextLangs[i].headline;
-        s.text.currentSubheadlineLang = originalTextLangs[i].subheadline;
-    });
-    updateCanvas();
-
-    // Generate ZIP
-    showExportProgress('Generating ZIP...', '', 95);
-    const content = await zip.generateAsync({ type: 'blob' });
-
-    showExportProgress('Complete!', '', 100);
-    await new Promise(resolve => setTimeout(resolve, 1500));
-    hideExportProgress();
-
-    const link = document.createElement('a');
-    link.download = `screenshots_${state.outputDevice}_${lang}.zip`;
-    link.href = URL.createObjectURL(content);
-    link.click();
-    URL.revokeObjectURL(link.href);
-}
-
-// Export all screenshots for all languages (separate folders)
-async function exportAllLanguages() {
-    const originalIndex = state.selectedIndex;
-    const originalLang = state.currentLanguage;
-    const zip = new JSZip();
-
-    const totalLangs = state.projectLanguages.length;
-    const totalScreenshots = state.screenshots.length;
-    const totalItems = totalLangs * totalScreenshots;
-    let completedItems = 0;
-
-    // Show progress
-    showExportProgress('Exporting...', 'Preparing all languages', 0);
-
-    // Save original text languages for each screenshot
-    const originalTextLangs = state.screenshots.map(s => ({
-        headline: s.text.currentHeadlineLang,
-        subheadline: s.text.currentSubheadlineLang
-    }));
-
-    for (let langIdx = 0; langIdx < state.projectLanguages.length; langIdx++) {
-        const lang = state.projectLanguages[langIdx];
-        const langName = languageNames[lang] || lang.toUpperCase();
-
-        // Temporarily switch to this language (images and text)
+    try {
+        // Temporarily switch to the target language (images and text)
         state.currentLanguage = lang;
         state.screenshots.forEach(s => {
             s.text.currentHeadlineLang = lang;
@@ -8454,43 +8462,133 @@ async function exportAllLanguages() {
             state.selectedIndex = i;
             updateCanvas();
 
-            completedItems++;
-            const percent = Math.round((completedItems / totalItems) * 90); // Reserve 10% for ZIP
-            showExportProgress('Exporting...', `${langName}: Screenshot ${i + 1} of ${totalScreenshots}`, percent);
+            // Update progress
+            const percent = Math.round(((i + 1) / total) * 90); // Reserve 10% for ZIP generation
+            showExportProgress('Exporting...', `Screenshot ${i + 1} of ${total}`, percent);
 
             await new Promise(resolve => setTimeout(resolve, 100));
 
-            // Get canvas data as base64, strip the data URL prefix
-            const dataUrl = canvas.toDataURL('image/png');
-            const base64Data = dataUrl.replace(/^data:image\/png;base64,/, '');
-
-            // Use language code as folder name
-            zip.file(`${lang}/screenshot-${i + 1}.png`, base64Data, { base64: true });
+            const blob = await canvasToBlob(canvas);
+            zip.file(`screenshot-${i + 1}.png`, blob);
         }
+
+        // Generate ZIP
+        showExportProgress('Generating ZIP...', '', 95);
+        const content = await generateZipBlob(zip, (metadata) => {
+            const zipPercent = 90 + Math.round((metadata.percent / 100) * 10); // last 10%
+            showExportProgress('Generating ZIP...', metadata.currentFile || '', zipPercent);
+        });
+
+        showExportProgress('Complete!', '', 100);
+        await new Promise(resolve => setTimeout(resolve, 1500));
+
+        const link = document.createElement('a');
+        link.download = `screenshots_${state.outputDevice}_${lang}.zip`;
+        link.href = URL.createObjectURL(content);
+        link.click();
+        URL.revokeObjectURL(link.href);
+    } catch (error) {
+        console.error('Export failed:', error);
+        await showAppAlert('Export failed: ' + error.message, 'error');
+    } finally {
+        // Restore original settings
+        state.selectedIndex = originalIndex;
+        state.currentLanguage = originalLang;
+        state.screenshots.forEach((s, i) => {
+            s.text.currentHeadlineLang = originalTextLangs[i].headline;
+            s.text.currentSubheadlineLang = originalTextLangs[i].subheadline;
+        });
+        isExportingScreenshots = false;
+        updateCanvas();
+        hideExportProgress();
     }
+}
 
-    // Restore original settings
-    state.selectedIndex = originalIndex;
-    state.currentLanguage = originalLang;
-    state.screenshots.forEach((s, i) => {
-        s.text.currentHeadlineLang = originalTextLangs[i].headline;
-        s.text.currentSubheadlineLang = originalTextLangs[i].subheadline;
-    });
-    updateCanvas();
+// Export all screenshots for all languages.
+// Generates and downloads a SEPARATE zip per language rather than one giant
+// archive with per-language folders. Bundling every language's full-res
+// images into a single JSZip instance (and then materializing them all into
+// one in-memory Blob at the end) is what was pushing large projects into
+// out-of-memory crashes - each language's zip is now built, downloaded, and
+// released before moving to the next, so peak memory stays bounded to a
+// single language's worth of images regardless of project size.
+async function exportAllLanguages() {
+    const originalIndex = state.selectedIndex;
+    const originalLang = state.currentLanguage;
+    isExportingScreenshots = true;
 
-    // Generate ZIP
-    showExportProgress('Generating ZIP...', '', 95);
-    const content = await zip.generateAsync({ type: 'blob' });
+    const totalLangs = state.projectLanguages.length;
+    const totalScreenshots = state.screenshots.length;
 
-    showExportProgress('Complete!', '', 100);
-    await new Promise(resolve => setTimeout(resolve, 1500));
-    hideExportProgress();
+    // Show progress
+    showExportProgress('Exporting...', 'Preparing all languages', 0);
 
-    const link = document.createElement('a');
-    link.download = `screenshots_${state.outputDevice}_all-languages.zip`;
-    link.href = URL.createObjectURL(content);
-    link.click();
-    URL.revokeObjectURL(link.href);
+    // Save original text languages for each screenshot
+    const originalTextLangs = state.screenshots.map(s => ({
+        headline: s.text.currentHeadlineLang,
+        subheadline: s.text.currentSubheadlineLang
+    }));
+
+    try {
+        for (let langIdx = 0; langIdx < state.projectLanguages.length; langIdx++) {
+            const lang = state.projectLanguages[langIdx];
+            const langName = languageNames[lang] || lang.toUpperCase();
+            const rangeStart = (langIdx / totalLangs) * 100;
+            const rangeSize = 100 / totalLangs;
+
+            // Temporarily switch to this language (images and text)
+            state.currentLanguage = lang;
+            state.screenshots.forEach(s => {
+                s.text.currentHeadlineLang = lang;
+                s.text.currentSubheadlineLang = lang;
+            });
+
+            const zip = new JSZip();
+
+            for (let i = 0; i < state.screenshots.length; i++) {
+                state.selectedIndex = i;
+                updateCanvas();
+
+                const percent = rangeStart + ((i + 1) / totalScreenshots) * rangeSize * 0.9; // reserve last 10% of this language's slice for its ZIP
+                showExportProgress('Exporting...', `${langName}: Screenshot ${i + 1} of ${totalScreenshots}`, Math.round(percent));
+
+                await new Promise(resolve => setTimeout(resolve, 100));
+
+                const blob = await canvasToBlob(canvas);
+                zip.file(`screenshot-${i + 1}.png`, blob);
+            }
+
+            // Generate and download this language's ZIP before starting the next
+            showExportProgress('Generating ZIP...', langName, Math.round(rangeStart + rangeSize * 0.9));
+            const content = await generateZipBlob(zip, (metadata) => {
+                const zipPercent = rangeStart + (0.9 + (metadata.percent / 100) * 0.1) * rangeSize;
+                showExportProgress('Generating ZIP...', `${langName}: ${metadata.currentFile || ''}`, Math.round(zipPercent));
+            });
+
+            const link = document.createElement('a');
+            link.download = `screenshots_${state.outputDevice}_${lang}.zip`;
+            link.href = URL.createObjectURL(content);
+            link.click();
+            URL.revokeObjectURL(link.href);
+        }
+
+        showExportProgress('Complete!', '', 100);
+        await new Promise(resolve => setTimeout(resolve, 1500));
+    } catch (error) {
+        console.error('Export failed:', error);
+        await showAppAlert('Export failed: ' + error.message, 'error');
+    } finally {
+        // Restore original settings
+        state.selectedIndex = originalIndex;
+        state.currentLanguage = originalLang;
+        state.screenshots.forEach((s, i) => {
+            s.text.currentHeadlineLang = originalTextLangs[i].headline;
+            s.text.currentSubheadlineLang = originalTextLangs[i].subheadline;
+        });
+        isExportingScreenshots = false;
+        updateCanvas();
+        hideExportProgress();
+    }
 }
 
 // ===== Emoji Picker (inline dropdown) =====
